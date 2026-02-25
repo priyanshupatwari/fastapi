@@ -20,20 +20,21 @@
 9. [Response Models — Filtering Output](#9-response-models--filtering-output)
 10. [APIRouters — Splitting Routes](#10-apirouters--splitting-routes)
 11. [Dependencies — Depends()](#11-dependencies--depends)
-12. [Quick Reference Cheatsheet](#12-quick-reference-cheatsheet)
+12. [Middleware — Request Lifecycle Interception](#12-middleware--request-lifecycle-interception)
+13. [Quick Reference Cheatsheet](#13-quick-reference-cheatsheet)
 
 **Part 2 — The Blog API Project**
-13. [Project Structure & Layers](#13-project-structure--layers)
-14. [Supabase Setup](#14-supabase-setup)
-15. [Config & Environment Variables](#15-config--environment-variables)
-16. [Pydantic Schemas](#16-pydantic-schemas)
-17. [Database Layer](#17-database-layer)
-18. [CRUD Functions — Call Signatures & Returns](#18-crud-functions--call-signatures--returns)
-19. [Auth Dependency Chain](#19-auth-dependency-chain)
-20. [Route Walkthroughs — Every Endpoint](#20-route-walkthroughs--every-endpoint)
-21. [App Startup & Wiring](#21-app-startup--wiring)
-22. [Running, Testing & Debugging](#22-running-testing--debugging)
-23. [Error Reference](#23-error-reference)
+14. [Project Structure & Layers](#14-project-structure--layers)
+15. [Supabase Setup](#15-supabase-setup)
+16. [Config & Environment Variables](#16-config--environment-variables)
+17. [Pydantic Schemas](#17-pydantic-schemas)
+18. [Database Layer](#18-database-layer)
+19. [CRUD Functions — Call Signatures & Returns](#19-crud-functions--call-signatures--returns)
+20. [Auth Dependency Chain](#20-auth-dependency-chain)
+21. [Route Walkthroughs — Every Endpoint](#21-route-walkthroughs--every-endpoint)
+22. [App Startup & Wiring](#22-app-startup--wiring)
+23. [Running, Testing & Debugging](#23-running-testing--debugging)
+24. [Error Reference](#24-error-reference)
 
 ---
 
@@ -628,7 +629,74 @@ Some routes are public but show more data to logged-in users. Use `auto_error=Fa
 
 ---
 
-## 12. Quick Reference Cheatsheet
+## 12. Middleware — Request Lifecycle Interception
+
+Middleware sits between the web server and your route handlers. It intercepts **every request before it reaches any route** and **every response before it leaves the server**. Unlike `Depends()`, which is opt-in per-route, middleware runs on **all requests unconditionally**.
+
+```
+Client Request
+    → Middleware (runs first — can read/modify the request)
+        → Route Handler (your endpoint runs here)
+    ← Middleware (runs again — can read/modify the response)
+← Client Response
+```
+
+### How to write middleware in FastAPI
+
+FastAPI (via Starlette) provides `BaseHTTPMiddleware`. Subclass it and override `dispatch`:
+
+```python
+import time
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:
+        # ── Before the route handler ──────────────────────────────
+        print(f"→ {request.method}  {request.url.path}")
+        start = time.perf_counter()
+
+        response = await call_next(request)  # ← route handler runs here
+
+        # ── After the route handler ───────────────────────────────
+        duration_ms = (time.perf_counter() - start) * 1000
+        print(f"← {response.status_code}  {request.method}  {request.url.path}  {duration_ms:.1f}ms")
+
+        return response
+```
+
+Register it on the app — order matters, last registered runs outermost:
+
+```python
+app.add_middleware(RequestLoggingMiddleware)
+```
+
+### Middleware vs. Dependency Injection
+
+| | Middleware | `Depends()` |
+|---|---|---|
+| **Runs on** | Every request globally | Only routes that declare it |
+| **Typical use** | Logging, CORS, rate limiting, timing | Auth, pagination, validation |
+| **Can access response** | Yes — wraps the entire handler | No |
+| **Route-specific** | No | Yes |
+
+Use middleware for **cross-cutting concerns** that apply uniformly (logging, CORS, compression). Use `Depends()` for **route-specific logic** like authentication.
+
+### Execution order of multiple middlewares
+
+FastAPI processes middleware in **reverse registration order** (last added = outermost wrapper):
+
+```python
+app.add_middleware(CORSMiddleware)        # ← registered first = runs second (inner)
+app.add_middleware(RequestLoggingMiddleware)  # ← registered second = runs first (outer)
+```
+
+For each request: `RequestLoggingMiddleware.before → CORSMiddleware.before → route handler → CORSMiddleware.after → RequestLoggingMiddleware.after`
+
+---
+
+## 13. Quick Reference Cheatsheet
 
 ### Pydantic
 
@@ -702,14 +770,14 @@ user_id = payload.get("sub")
 
 ---
 
-## 13. Project Structure & Layers
+## 14. Project Structure & Layers
 
 ```
 blog_api/
 │
 ├── app/
 │   ├── __init__.py            # empty — marks this as a Python package
-│   ├── main.py                # Creates FastAPI(), registers routers, CORS middleware
+│   ├── main.py                # Creates FastAPI(), registers routers, CORS + logging middleware
 │   ├── config.py              # Reads .env file, exposes typed `settings` object
 │   ├── database.py            # Supabase clients. Created once, imported everywhere.
 │   │
@@ -729,9 +797,13 @@ blog_api/
 │   │   ├── user.py            # get_user_by_id, get_user_by_email, create_user_profile
 │   │   └── blog.py            # get_blog, get_blogs, create_blog, update_blog, delete_blog
 │   │
-│   └── dependencies/          # FastAPI Depends() functions
+│   ├── dependencies/          # FastAPI Depends() functions
+│   │   ├── __init__.py
+│   │   └── auth.py            # create_access_token, decode_access_token, get_current_user
+│   │
+│   └── middleware/            # Starlette BaseHTTPMiddleware classes
 │       ├── __init__.py
-│       └── auth.py            # create_access_token, decode_access_token, get_current_user
+│       └── logging_middleware.py  # RequestLoggingMiddleware — logs every request
 │
 ├── .env                       # Secret keys — NEVER commit to git
 ├── .env.example               # Template with placeholder values — safe to commit
@@ -749,7 +821,8 @@ Request → routers → dependencies / crud → database → models / config →
 
 | Layer | File(s) | Knows about | Does NOT know about |
 |---|---|---|---|
-| Entry point | `main.py` | Routers, CORS | Business logic |
+| Entry point | `main.py` | Routers, middleware | Business logic |
+| Middleware | `middleware/*.py` | HTTP request/response | Business logic, DB, models |
 | Route handlers | `routers/*.py` | HTTP + crud + dependencies | How the database works internally |
 | Auth dependency | `dependencies/auth.py` | JWT, DB, models | Business logic |
 | Database ops | `crud/*.py` | Supabase client + models | HTTP requests, HTTPException |
@@ -807,7 +880,7 @@ config.py
 
 ---
 
-## 14. Supabase Setup
+## 15. Supabase Setup
 
 ### Create your project
 
@@ -898,7 +971,7 @@ CREATE TRIGGER blogs_updated_at
 
 ---
 
-## 15. Config & Environment Variables
+## 16. Config & Environment Variables
 
 ### Install all project packages
 
@@ -946,7 +1019,7 @@ Everything else in the app imports `settings` from `app.config` and accesses key
 
 ---
 
-## 16. Pydantic Schemas
+## 17. Pydantic Schemas
 
 Schemas live in `app/models/` and define the exact shape of data at every API boundary — what comes in from the client and what goes out.
 
@@ -972,7 +1045,7 @@ Schemas live in `app/models/` and define the exact shape of data at every API bo
 
 ---
 
-## 17. Database Layer
+## 18. Database Layer
 
 ### What `app/database.py` creates
 
@@ -1001,7 +1074,7 @@ Every query is a method chain ending in `.execute()`. The result object always h
 
 ---
 
-## 18. CRUD Functions — Call Signatures & Returns
+## 19. CRUD Functions — Call Signatures & Returns
 
 CRUD functions are pure database operations with no HTTP logic. They accept a Supabase client and typed arguments, and return plain Python dicts or `None`. They never raise `HTTPException` — that job belongs to the routers.
 
@@ -1080,7 +1153,7 @@ CRUD functions are pure database operations with no HTTP logic. They accept a Su
 
 ---
 
-## 19. Auth Dependency Chain
+## 20. Auth Dependency Chain
 
 Protected routes declare `current_user: UserResponse = Depends(get_current_user)`. FastAPI executes this entire chain before the handler runs.
 
@@ -1138,7 +1211,7 @@ Route handler runs with current_user = UserResponse(...)
 
 ---
 
-## 20. Route Walkthroughs — Every Endpoint
+## 21. Route Walkthroughs — Every Endpoint
 
 ---
 
@@ -1257,7 +1330,7 @@ All body fields are optional — only send what you want to change.
 
 ---
 
-## 21. App Startup & Wiring
+## 22. App Startup & Wiring
 
 ### What happens when you run `uvicorn app.main:app`
 
@@ -1274,12 +1347,13 @@ All body fields are optional — only send what you want to change.
 
 - Creates the `FastAPI()` instance with a title, description, version, and doc URLs (`/docs` for Swagger UI, `/redoc` for ReDoc)
 - Adds `CORSMiddleware` — specifies which frontend origins can call the API, whether credentials (cookies/tokens) are allowed, and which methods and headers are permitted. In production replace the wildcard origin with your real frontend domain.
+- Adds `RequestLoggingMiddleware` — logs every incoming request (method + path) and the corresponding response (status code + duration in ms) to stdout via Python's `logging` module.
 - Registers all three routers: `auth.router` (prefix `/auth`), `blogs.router` (prefix `/blogs`), `users.router` (prefix `/users`)
 - Adds a public `GET /` health check endpoint that returns `{"status": "ok"}`
 
 ---
 
-## 22. Running, Testing & Debugging
+## 23. Running, Testing & Debugging
 
 ### Start the development server
 
@@ -1364,7 +1438,7 @@ Set breakpoints in any route handler. The debugger will pause there on the next 
 
 ---
 
-## 23. Error Reference
+## 24. Error Reference
 
 ### Per-endpoint errors
 

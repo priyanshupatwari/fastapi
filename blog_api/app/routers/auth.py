@@ -31,6 +31,11 @@ def register(user_data: UserCreate):
         )
 
     # Step 2 — create the auth user in Supabase Auth
+    # Create the user in Supabase Auth (auth.users). Supabase Auth (GoTrue)
+    # manages authentication fields (hashed password, confirmation, provider
+    # info). The returned object is stored in `auth_response` and contains
+    # `auth_response.user` (the auth user's record) and session info when
+    # applicable.
     try:
         auth_response = supabase_admin.auth.sign_up({
             "email": user_data.email,
@@ -45,7 +50,11 @@ def register(user_data: UserCreate):
             detail="Registration failed — Supabase Auth did not return a user"
         )
 
-    # Step 3 — create the profile in public.profiles
+    # Step 3 — create the profile in `public.profiles` (application data).
+    # `auth.users` (managed by Supabase Auth) is separate from the app's
+    # `profiles` table. We use the auth user's id as the profile id to link
+    # the two records. Because the new user has no session yet, the admin
+    # client (`supabase_admin`) is used to bypass RLS for this insert.
     user_id = str(auth_response.user.id)
     create_user_profile(
         db=supabase_admin,
@@ -71,6 +80,9 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     The field is called 'username' because that's what the OAuth2 spec requires.
     We use it for the email address.
     """
+    # Sign in via Supabase Auth — returns an auth response containing the
+    # authenticated user (`auth_response.user`). We then take
+    # `auth_response.user.id` and issue a JWT for our API (`create_access_token`).
     try:
         auth_response = supabase.auth.sign_in_with_password({
             "email": form_data.username,   # OAuth2 spec calls it username; we use it as email

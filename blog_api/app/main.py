@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.middleware.logging_middleware import RequestLoggingMiddleware
 from app.routers import auth, blogs, users
 
 
@@ -21,6 +22,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Request logging — logs method, path, status code, and response time for every request
+app.add_middleware(RequestLoggingMiddleware)
 
 # Register all routers
 app.include_router(auth.router)
